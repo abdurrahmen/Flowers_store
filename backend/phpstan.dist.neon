@@ -1,0 +1,22 @@
+parameters:
+    level: max
+    paths:
+        - bin/
+        - config/
+        - src/
+        - tests/
+    tmpDir: var/cache/phpstan
+    symfony:
+        containerXmlPath: var/cache/dev/App_KernelDevDebugContainer.xml
+    # Generated or rewritten by Symfony Flex: leave them as the recipes ship them.
+    excludePaths:
+        - config/bundles.php
+        - config/preload.php
+        - config/reference.php
+
+services:
+    # Architecture rules (PHPat): each class tagged phpat.test is read for rules.
+    -
+        class: App\Tests\Architecture\ArchitectureTest
+        tags:
+            - phpat.test
