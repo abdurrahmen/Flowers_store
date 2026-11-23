@@ -1,0 +1,197 @@
+name: estiba
+
+# The API and the worker run the same image, with the same environment and code.
+x-php-environment: &php-environment
+  DATABASE_URL: "postgresql://${POSTGRES_USER:-estiba}:${POSTGRES_PASSWORD:-estiba}@database:5432/${POSTGRES_DB:-estiba}?serverVersion=17&charset=utf8"
+  REDIS_URL: "redis://redis:6379"
+  MESSENGER_TRANSPORT_DSN: "redis://redis:6379/messages"
+  MESSENGER_FAILED_TRANSPORT_DSN: "doctrine://default?queue_name=failed&auto_setup=0"
+  XDEBUG_MODE: "${XDEBUG_MODE:-off}"
+  # The Mercure hub is the one inside the php service (backend/frankenphp/Caddyfile, ADR 0045). The
+  # keys here are for development only: set your own in production.
+  # The simulated legacy ERP (ADR 0046, ADR 0047). It is only there after `make erp-up`; the application
+  # does not need it to start.
+  ERP_SOAP_WSDL: "${ERP_SOAP_WSDL:-http://erp/soap/erp.php?wsdl}"
+  # The import of the orders of the ERP (ADR 0048): the tenant and the warehouse that receive them (empty
+  # means the import is not set up) and the SFTP folder where the ERP leaves them.
+  ERP_TENANT_ID: "${ERP_TENANT_ID:-}"
+  ERP_WAREHOUSE_CODE: "${ERP_WAREHOUSE_CODE:-ZGZ1}"
+  ERP_SFTP_HOST: "${ERP_SFTP_HOST:-erp-sftp}"
+  ERP_SFTP_PORT: "22"
+  ERP_SFTP_USER: "erp"
+  ERP_SFTP_PASSWORD: "${ERP_SFTP_PASSWORD:-erp-dev-password}"
+  ERP_SFTP_DIRECTORY: "outbox"
+  MERCURE_URL: "http://php/.well-known/mercure"
+  MERCURE_PUBLISHER_JWT_KEY: "${MERCURE_PUBLISHER_JWT_KEY:-dev-publisher-key-change-me-0123456789abcdef}"
+  MERCURE_SUBSCRIBER_JWT_KEY: "${MERCURE_SUBSCRIBER_JWT_KEY:-dev-subscriber-key-change-me-0123456789abcdef}"
+
+x-php-volumes: &php-volumes
+  - ./backend:/app
+  # vendor/ and var/ live in Docker volumes: reading thousands of files
+  # through a Windows or macOS bind mount makes every request ~15x slower.
+  - php_vendor:/app/vendor
+  - php_var:/app/var
+
+services:
+  php:
+    build:
+      context: ./backend
+      target: frankenphp_dev
+    environment:
+      <<: *php-environment
+      SERVER_NAME: ":80"
+    volumes: *php-volumes
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      database:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Handles the events routed to the async transport (ADR 0012). It stops by itself every hour or
+  # after 256 MB and Docker starts it again, so a long-running PHP process never grows stale.
+  # After changing code, restart it: make worker-restart.
+  worker:
+    build:
+      context: ./backend
+      target: frankenphp_dev
+    command: ["php", "bin/console", "messenger:consume", "async", "--time-limit=3600", "--memory-limit=256M", "-vv"]
+    environment: *php-environment
+    volumes: *php-volumes
+    restart: unless-stopped
+    healthcheck:
+      disable: true
+    depends_on:
+      # The API container installs the dependencies on a fresh clone; the worker waits for it.
+      php:
+        condition: service_started
+      database:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # The development server of the React app. It forwards /api and /health to the PHP service, so the
+  # browser talks to one address only and the API needs no CORS (ADR 0021). Like vendor/, node_modules
+  # lives in a Docker volume, and the entrypoint installs it again when package-lock.json changes.
+  frontend:
+    build:
+      context: ./frontend
+      target: frontend_dev
+    environment:
+      API_PROXY_TARGET: "http://php"
+      # A bind mount from Windows or macOS does not tell the container that a file changed.
+      VITE_USE_POLLING: "${VITE_USE_POLLING:-true}"
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:5173/ || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      # The first start installs the dependencies, which takes a few minutes.
+      start_period: 300s
+    depends_on:
+      php:
+        condition: service_started
+
+  # Looks for new orders in the outbox of the ERP every 30 seconds (E08-03, ADR 0048). It is behind the "erp"
+  # profile with the ERP, and does nothing until ERP_TENANT_ID is set. After changing code, restart it.
+  scheduler:
+    profiles: ["erp"]
+    build:
+      context: ./backend
+      target: frankenphp_dev
+    command: ["php", "bin/console", "messenger:consume", "scheduler_erp", "--bus=job.bus", "--time-limit=3600", "--memory-limit=256M", "-vv"]
+    environment: *php-environment
+    volumes: *php-volumes
+    restart: unless-stopped
+    healthcheck:
+      disable: true
+    depends_on:
+      php:
+        condition: service_started
+      database:
+        condition: service_healthy
+      erp-sftp:
+        condition: service_healthy
+
+  # The legacy ERP Estiba integrates with (ADR 0046): an old PHP 5.6 application that takes customer
+  # orders, leaves them as CSV files in a folder and answers a SOAP service. It is behind the "erp"
+  # profile, so it does not slow the usual start: bring it up with `make erp-up`.
+  erp:
+    profiles: ["erp"]
+    build:
+      context: ./erp-legacy
+    environment:
+      ERP_EXPORT_INTERVAL: "${ERP_EXPORT_INTERVAL:-15}"
+      ERP_SEED_ORDERS: "${ERP_SEED_ORDERS:-3}"
+    volumes:
+      - erp_data:/var/erp/data
+      - erp_outbox:/var/erp/outbox
+    ports:
+      - "${ERP_PORT:-8081}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "php -r 'exit(@file_get_contents(\"http://127.0.0.1/soap/erp.php?wsdl\") === false ? 1 : 0);'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  # The SFTP server that shows the ERP's output folder. Estiba reads the order files here (E08-03).
+  # The password is for development only.
+  erp-sftp:
+    profiles: ["erp"]
+    image: atmoz/sftp:debian
+    command: ["erp:${ERP_SFTP_PASSWORD:-erp-dev-password}:::outbox"]
+    volumes:
+      - erp_outbox:/home/erp/outbox
+    ports:
+      - "${ERP_SFTP_PORT:-2222}:22"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/22'"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    depends_on:
+      erp:
+        condition: service_healthy
+
+  database:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-estiba}"
+      POSTGRES_USER: "${POSTGRES_USER:-estiba}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-estiba}"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    volumes:
+      - database_data:/var/lib/postgresql/data
+    ports:
+      - "${DATABASE_PORT:-5433}:5432"
+
+  redis:
+    image: redis:7.4-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  database_data:
+  php_vendor:
+  php_var:
+  frontend_node_modules:
+  erp_data:
+  erp_outbox:
