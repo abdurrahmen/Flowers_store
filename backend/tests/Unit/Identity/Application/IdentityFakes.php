@@ -1,0 +1,220 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Tests\Unit\Identity\Application;
+
+use App\Identity\Application\RefreshSecretGenerator;
+use App\Identity\Domain\Email;
+use App\Identity\Domain\PasswordHash;
+use App\Identity\Domain\PasswordHasher;
+use App\Identity\Domain\PlainPassword;
+use App\Identity\Domain\RefreshToken;
+use App\Identity\Domain\RefreshTokenRepository;
+use App\Identity\Domain\Role;
+use App\Identity\Domain\Tenant;
+use App\Identity\Domain\TenantRepository;
+use App\Identity\Domain\User;
+use App\Identity\Domain\UserId;
+use App\Identity\Domain\UserRepository;
+use App\Shared\Application\Bus\EventBus;
+use App\Shared\Application\Clock;
+use App\Shared\Application\IdGenerator;
+use App\Shared\Domain\DomainEvent;
+use App\Shared\Domain\Page;
+use App\Shared\Domain\PageRequest;
+use App\Shared\Domain\TenantId;
+use App\Tests\Unit\Support\Ids;
+
+/**
+ * The ports of the Identity use cases, in memory, so a unit test needs no database and no kernel.
+ */
+final readonly class IdentityFakes
+{
+    public InMemoryUsers $users;
+
+    public InMemoryTenants $tenants;
+
+    public InMemoryRefreshTokens $refreshTokens;
+
+    public function __construct()
+    {
+        $this->users = new InMemoryUsers();
+        $this->tenants = new InMemoryTenants();
+        $this->refreshTokens = new InMemoryRefreshTokens();
+    }
+
+    /**
+     * Secrets that are different every time, and that a test can predict.
+     */
+    public static function secrets(): RefreshSecretGenerator
+    {
+        return new class implements RefreshSecretGenerator {
+            private int $counter = 0;
+
+            #[\Override]
+            public function next(): string
+            {
+                return 'secret-'.++$this->counter;
+            }
+        };
+    }
+
+    public static function hasher(): PasswordHasher
+    {
+        return new class implements PasswordHasher {
+            public function hash(PlainPassword $password): PasswordHash
+            {
+                return new PasswordHash('hashed:'.strrev($password->reveal()));
+            }
+        };
+    }
+
+    public static function ids(): IdGenerator
+    {
+        return new class implements IdGenerator {
+            #[\Override]
+            public function next(): string
+            {
+                return Ids::next();
+            }
+        };
+    }
+
+    /**
+     * An event bus that forgets what it is told: these tests look at the use cases, not at the policies.
+     */
+    public static function events(): EventBus
+    {
+        return new class implements EventBus {
+            public function publish(DomainEvent ...$events): void
+            {
+            }
+        };
+    }
+
+    public static function clock(): Clock
+    {
+        return new class implements Clock {
+            public function now(): \DateTimeImmutable
+            {
+                return new \DateTimeImmutable('2026-10-20T10:00:00+00:00');
+            }
+        };
+    }
+}
+
+final class InMemoryUsers implements UserRepository
+{
+    /** @var array<string, User> by email */
+    public array $saved = [];
+
+    #[\Override]
+    public function find(UserId $id): ?User
+    {
+        foreach ($this->saved as $user) {
+            if ($user->id()->equals($id)) {
+                return $user;
+            }
+        }
+
+        return null;
+    }
+
+    #[\Override]
+    public function findByEmail(Email $email): ?User
+    {
+        return $this->saved[$email->value] ?? null;
+    }
+
+    #[\Override]
+    public function save(User $user): void
+    {
+        $this->saved[$user->email()->value] = $user;
+    }
+
+    #[\Override]
+    public function isTaken(Email $email): bool
+    {
+        return isset($this->saved[$email->value]);
+    }
+
+    #[\Override]
+    public function search(TenantId $tenantId, PageRequest $page): Page
+    {
+        $users = array_values(array_filter($this->saved, static fn (User $user): bool => $user->tenantId()->equals($tenantId)));
+        usort($users, static fn (User $a, User $b): int => $a->email()->value <=> $b->email()->value);
+
+        return new Page(\array_slice($users, $page->offset(), $page->itemsPerPage), \count($users), $page);
+    }
+
+    #[\Override]
+    public function countIn(TenantId $tenantId): int
+    {
+        return \count(array_filter($this->saved, static fn (User $user): bool => $user->tenantId()->equals($tenantId) && $user->isActive() && $user->hasRole(Role::Admin)));
+    }
+}
+
+final class InMemoryTenants implements TenantRepository
+{
+    /** @var array<string, Tenant> by identifier */
+    public array $saved = [];
+
+    #[\Override]
+    public function find(TenantId $id): ?Tenant
+    {
+        return $this->saved[$id->value] ?? null;
+    }
+
+    #[\Override]
+    public function save(Tenant $tenant): void
+    {
+        $this->saved[$tenant->id()->value] = $tenant;
+    }
+}
+
+/**
+ * A clock that a test moves forward.
+ */
+final class MovableClock implements Clock
+{
+    public function __construct(public \DateTimeImmutable $now)
+    {
+    }
+
+    #[\Override]
+    public function now(): \DateTimeImmutable
+    {
+        return $this->now;
+    }
+}
+
+final class InMemoryRefreshTokens implements RefreshTokenRepository
+{
+    /** @var list<RefreshToken> */
+    public array $saved = [];
+
+    #[\Override]
+    public function findBySecretHash(string $secretHash): ?RefreshToken
+    {
+        foreach ($this->saved as $token) {
+            if ($token->hasSecretHash($secretHash)) {
+                return $token;
+            }
+        }
+
+        return null;
+    }
+
+    #[\Override]
+    public function findLiveInFamily(string $familyId): array
+    {
+        return array_values(array_filter($this->saved, static fn (RefreshToken $token): bool => $token->familyId() === $familyId && !$token->isRevoked()));
+    }
+
+    #[\Override]
+    public function save(RefreshToken $token): void
+    {
+        $this->saved[] = $token;
+    }
+}
