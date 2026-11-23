@@ -1,0 +1,92 @@
+security:
+    # Passwords are hashed with the best algorithm available. The domain only sees the PasswordHasher
+    # port, so this is the one place that chooses it (ADR 0008).
+    password_hashers:
+        App\Identity\Infrastructure\Security\SecurityUser: 'auto'
+
+    # Every request loads its user from the database, so a disabled user stops at once.
+    providers:
+        users:
+            id: App\Identity\Infrastructure\Security\DoctrineUserProvider
+
+    # Each role includes the ones below it.
+    role_hierarchy:
+        ROLE_ADMIN: ROLE_SUPERVISOR
+        ROLE_SUPERVISOR: ROLE_OPERATOR
+
+    firewalls:
+        dev:
+            # Ensure dev tools and static assets are always allowed
+            pattern: ^/(_profiler|_wdt|assets|build)/
+            security: false
+
+        # Signing in, renewing the session and signing out do not need a token: they are how you get
+        # one (ADR 0022). A stale Authorization header sent along is ignored.
+        login:
+            pattern: ^/api/auth/(login|refresh|logout)
+            stateless: true
+            provider: users
+            user_checker: App\Identity\Infrastructure\Security\UserChecker
+            json_login:
+                check_path: api_login_check
+                username_path: email
+                password_path: password
+                success_handler: lexik_jwt_authentication.handler.authentication_success
+                failure_handler: lexik_jwt_authentication.handler.authentication_failure
+            # Five tries for each email from each address, and twenty-five from an address for any email,
+            # in fifteen minutes. The sixth is refused with a 429, even with the right password, until the
+            # window moves on (ADR 0054). The state lives in Redis, so every instance counts the same tries.
+            login_throttling:
+                max_attempts: 5
+                interval: '15 minutes'
+                cache_pool: cache.login_throttling
+                # Without the Lock component, two tries at the same instant can both get in. That is a few
+                # extra tries, not a way round the limit.
+                lock_factory: null
+
+        api:
+            pattern: ^/api
+            stateless: true
+            provider: users
+            user_checker: App\Identity\Infrastructure\Security\UserChecker
+            jwt: ~
+            access_denied_handler: App\Identity\Infrastructure\Security\AccessDeniedHandler
+
+    # Note: Only the *first* matching rule is applied.
+    # Reading needs any signed-in user. Changing anything needs a supervisor or an admin, except the
+    # work of the dock: opening a receipt, counting what arrives, closing it, and putting the goods
+    # away, walking a pick list, and packing parcels. Approving an over-receipt stays with supervisors (INB-08).
+    access_control:
+        - { path: ^/api/auth/(login|refresh|logout), roles: PUBLIC_ACCESS }
+        - { path: ^/api/docs, roles: PUBLIC_ACCESS }
+        - { path: '^/api/asns/[^/]+/receipts$', methods: [POST], roles: ROLE_OPERATOR }
+        - { path: '^/api/receipts/[^/]+/(items|close)$', methods: [POST], roles: ROLE_OPERATOR }
+        - { path: '^/api/putaway-tasks/[^/]+/(confirm|split)$', methods: [POST], roles: ROLE_OPERATOR }
+        - { path: '^/api/pick-lists/[^/]+/(start|lines/[0-9]+/confirm)$', methods: [POST], roles: ROLE_OPERATOR }
+        - { path: '^/api/shipments(/[^/]+/(parcels|complete))?$', methods: [POST], roles: ROLE_OPERATOR }
+        # Managing who can use the tenant, and with which roles, is for admins alone (ADR 0060).
+        - { path: ^/api/users, roles: ROLE_ADMIN }
+        # The audit trail says who did what, so reading it is for supervisors and admins.
+        - { path: ^/api/audit-log, roles: ROLE_SUPERVISOR }
+        # The figures of the warehouse are for the people who run it.
+        - { path: ^/api/kpis, roles: ROLE_SUPERVISOR }
+        - { path: ^/api/notifications, roles: ROLE_SUPERVISOR }
+        # What the integration with the ERP did, and sending a failed confirmation again, is for supervisors (ADR 0050).
+        - { path: ^/api/erp, roles: ROLE_SUPERVISOR }
+        - { path: ^/api, methods: [GET, HEAD, OPTIONS], roles: ROLE_OPERATOR }
+        - { path: ^/api, roles: ROLE_SUPERVISOR }
+
+when@test:
+    security:
+        firewalls:
+            login:
+                login_throttling:
+                    storage_service: test.login_throttling_storage
+        password_hashers:
+            # Password hashers are resource-intensive by design to ensure security.
+            # In tests, it's safe to reduce their cost to improve performance.
+            App\Identity\Infrastructure\Security\SecurityUser:
+                algorithm: auto
+                cost: 4 # Lowest possible value for bcrypt
+                time_cost: 3 # Lowest possible value for argon
+                memory_cost: 10 # Lowest possible value for argon
