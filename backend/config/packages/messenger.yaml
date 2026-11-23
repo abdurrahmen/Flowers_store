@@ -1,0 +1,90 @@
+# Three buses, kept apart on purpose (ADR 0009, ADR 0011, ADR 0012):
+#   command.bus changes state. Every command runs in one database transaction, flushed at the end.
+#   query.bus only reads. It has no transaction and nothing it handles may change state.
+#   job.bus carries the messages of a schedule (ADR 0048). It has no transaction: a job does several things, each
+#   through the command bus, and each of those has its own.
+#   event.bus tells the policies what happened. An event published by a command waits until the
+#   command commits; then it goes to the async transport or, if it is not routed, to its handlers.
+#   Each handler runs in its own transaction, and an event nobody handles is fine.
+# Handlers are found by the interface they implement (see config/services.yaml), not by attributes,
+# so the Application layer does not import Symfony.
+framework:
+    messenger:
+        default_bus: command.bus
+        failure_transport: failed
+
+        buses:
+            command.bus:
+                middleware:
+                    - doctrine_transaction
+            query.bus: ~
+            job.bus: ~
+            event.bus:
+                default_middleware:
+                    enabled: true
+                    allow_no_handlers: true
+                middleware:
+                    # A worker runs for hours: reconnect if the database dropped the connection.
+                    - doctrine_ping_connection
+                    - doctrine_transaction
+
+        transports:
+            # A Redis stream. A policy that fails is retried after 1 s, 3 s and 9 s, then parked in
+            # the failed transport, a PostgreSQL table, for someone to look at (make failed,
+            # make retry-failed).
+            async:
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%'
+                retry_strategy:
+                    max_retries: 3
+                    delay: 1000
+                    multiplier: 3
+                    max_delay: 60000
+            failed: '%env(MESSENGER_FAILED_TRANSPORT_DSN)%'
+
+        # The policies that may run a moment later. Their handlers are idempotent: a message
+        # handled twice changes nothing the second time (ADR 0012). The stock read model follows
+        # the ledger this way too (ADR 0013).
+        routing:
+            App\Inbound\Domain\Event\ReceiptClosed: async
+            App\Inbound\Domain\Event\PutawayConfirmed: async
+            App\Inventory\Domain\Event\StockMovementRecorded: async
+            # Telling the people connected must never slow down or fail a pick (ADR 0045).
+            App\Outbound\Domain\Event\PickListCompleted: async
+            App\Outbound\Domain\Event\ShortPickReported: async
+            # Telling the ERP a shipment left must never fail a dispatch either (ADR 0049).
+            App\Outbound\Application\Contract\ShipmentLeft: async
+
+when@dev:
+    framework:
+        messenger:
+            buses:
+                command.bus:
+                    # This list replaces the one above, so the transaction is named again. The guard is
+                    # inside it, and fails a command whose aggregates raised events nobody published.
+                    middleware:
+                        - doctrine_transaction
+                        - App\Shared\Infrastructure\Messenger\PendingEventsGuard
+                event.bus:
+                    # The policies are use cases too: what their aggregates raise must be published.
+                    middleware:
+                        - doctrine_ping_connection
+                        - doctrine_transaction
+                        - App\Shared\Infrastructure\Messenger\PendingEventsGuard
+
+when@test:
+    framework:
+        messenger:
+            buses:
+                command.bus:
+                    middleware:
+                        - doctrine_transaction
+                        - App\Shared\Infrastructure\Messenger\PendingEventsGuard
+                event.bus:
+                    middleware:
+                        - doctrine_ping_connection
+                        - doctrine_transaction
+                        - App\Shared\Infrastructure\Messenger\PendingEventsGuard
+            # Tests handle the routed events at once, after the command commits, as a worker would.
+            transports:
+                async: 'sync://'
+                failed: 'in-memory://'
