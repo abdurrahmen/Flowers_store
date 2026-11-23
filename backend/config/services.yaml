@@ -1,0 +1,109 @@
+# yaml-language-server: $schema=../vendor/symfony/dependency-injection/Loader/schema/services.schema.json
+
+# This file is the entry point to configure your own services.
+# Files in the packages/ subdirectory configure your dependencies.
+# See also https://symfony.com/doc/current/service_container/import.html
+
+# Put parameters here that don't need to change on each machine where the app is deployed
+# https://symfony.com/doc/current/best_practices.html#use-parameters-for-application-configuration
+parameters:
+    # How putaway suggests a location: first_free, by_family or by_turnover (ADR 0011).
+    env(PUTAWAY_STRATEGY): 'by_family'
+    # The GS1 company prefix in front of every SSCC (OUT-19). This one is a placeholder for demos and
+    # tests: a company that ships real parcels sets the prefix GS1 licensed to it.
+    env(GS1_COMPANY_PREFIX): '8400000'
+    # The description (WSDL) of the SOAP service of the ERP (ADR 0047). In development it is the simulated
+    # ERP of `make erp-up`; in production it is the real one.
+    env(ERP_SOAP_WSDL): 'http://erp/soap/erp.php?wsdl'
+    # The import of the orders of the ERP (ADR 0048): the tenant and warehouse that receive them, and the SFTP
+    # folder where the ERP leaves them. Without a tenant the import does nothing.
+    env(ERP_TENANT_ID): ''
+    env(ERP_WAREHOUSE_CODE): 'ZGZ1'
+    env(ERP_SFTP_HOST): 'erp-sftp'
+    env(ERP_SFTP_PORT): '22'
+    env(ERP_SFTP_USER): 'erp'
+    env(ERP_SFTP_PASSWORD): 'erp-dev-password'
+    env(ERP_SFTP_DIRECTORY): 'outbox'
+    # The refresh token that keeps a user signed in (IDN-08 to IDN-10, ADR 0022), in seconds: how long
+    # one works after it was issued (7 days), how long a session lasts however often it renews
+    # (30 days), and how long a token just spent still counts as a second request of the same client.
+    refresh_token.lifetime: 604800
+    refresh_token.session: 2592000
+    refresh_token.grace: 10
+
+services:
+    # default configuration for services in *this* file
+    _defaults:
+        autowire: true      # Automatically injects dependencies in your services.
+        autoconfigure: true # Automatically registers your services as commands, event subscribers, etc.
+
+    # makes classes in src/ available to be used as services
+    # this creates a service per class whose id is the fully-qualified class name
+    App\:
+        resource: '../src/'
+
+    # Every handler is registered on its bus through the interface it implements (ADR 0009, ADR 0011).
+    # Messenger finds the message from the type of the argument of __invoke().
+    _instanceof:
+        App\Shared\Application\Bus\CommandHandler:
+            tags: [{ name: messenger.message_handler, bus: command.bus }]
+        App\Shared\Application\Bus\QueryHandler:
+            tags: [{ name: messenger.message_handler, bus: query.bus }]
+        App\Shared\Application\Bus\EventHandler:
+            tags: [{ name: messenger.message_handler, bus: event.bus }]
+        App\Shared\Application\Bus\JobHandler:
+            tags: [{ name: messenger.message_handler, bus: job.bus }]
+
+    # The event bus has two implementations, the one of Messenger and the audit trail that wraps it
+    # (AuditingEventBus), so the interface says which is the real one.
+    App\Shared\Application\Bus\EventBus: '@App\Shared\Infrastructure\Messenger\MessengerEventBus'
+
+    # The tenant is the one of the signed-in user unless a job sets its own (ADR 0048).
+    App\Shared\Infrastructure\Tenancy\ScopedCurrentTenant:
+        arguments:
+            $ofTheUser: '@App\Identity\Infrastructure\Security\SecurityCurrentTenant'
+    App\Shared\Application\CurrentTenant: '@App\Shared\Infrastructure\Tenancy\ScopedCurrentTenant'
+    App\Shared\Application\TenantRunner: '@App\Shared\Infrastructure\Tenancy\ScopedCurrentTenant'
+
+    App\Inbound\Application\Putaway\PutawayPlanner:
+        arguments:
+            $strategy: '%env(enum:App\Inbound\Domain\Putaway\PutawayStrategyName:PUTAWAY_STRATEGY)%'
+
+    App\Outbound\Infrastructure\Persistence\Sscc\DbalSsccSequence:
+        arguments:
+            $companyPrefix: '%env(GS1_COMPANY_PREFIX)%'
+
+    App\Erp\Infrastructure\Soap\LazySoapClientProvider:
+        arguments:
+            $wsdl: '%env(ERP_SOAP_WSDL)%'
+
+    App\Erp\Infrastructure\Sftp\SftpErpOrderInbox:
+        arguments:
+            $host: '%env(ERP_SFTP_HOST)%'
+            $port: '%env(int:ERP_SFTP_PORT)%'
+            $user: '%env(ERP_SFTP_USER)%'
+            $password: '%env(ERP_SFTP_PASSWORD)%'
+            $directory: '%env(ERP_SFTP_DIRECTORY)%'
+
+    App\Erp\Application\ImportErpOrdersHandler:
+        arguments:
+            $tenantId: '%env(ERP_TENANT_ID)%'
+            $warehouseCode: '%env(ERP_WAREHOUSE_CODE)%'
+
+    App\Identity\Application\RefreshTokenPolicy:
+        arguments:
+            $lifetimeSeconds: '%refresh_token.lifetime%'
+            $sessionSeconds: '%refresh_token.session%'
+            $graceSeconds: '%refresh_token.grace%'
+
+    # add more service definitions when explicit configuration is needed
+    # please note that last definitions always *replace* previous ones
+
+when@test:
+    services:
+        # Messages and handlers that only exist to test the buses. Their handlers are registered by
+        # the #[AsMessageHandler] attribute, so the test keeps working if the interfaces change.
+        App\Tests\Functional\Shared\Messaging\Fixtures\:
+            resource: '../tests/Functional/Shared/Messaging/Fixtures/'
+            autowire: true
+            autoconfigure: true
