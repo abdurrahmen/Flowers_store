@@ -1,0 +1,159 @@
+# Estiba WMS developer commands. Run `make` to list them.
+
+DC  := docker compose
+PHP := $(DC) exec -T php
+FRONT := $(DC) exec -T frontend
+
+.DEFAULT_GOAL := help
+.PHONY: help env up down build images logs sh composer console jwt-keys tenant demo stock-rebuild worker-logs worker-restart erp-up erp-logs erp-order erp-check perf-seed perf-clean perf-explain perf-load perf-prod-up perf-prod-down failed retry-failed validate test test-unit stan cs fix rector qa front-sh front-npm front-lint front-format front-typecheck front-test front-build front-api-types front-qa
+
+help: ## List available commands
+	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[33m%-10s\033[0m %s\n", $$1, $$2}'
+
+## —— Environment ————————————————————————————————————————————
+env: ## Create backend/.env from .env.example with new secrets (leaves an existing one alone)
+	@sh backend/scripts/create-env.sh
+
+up: env ## Start the stack and wait until it is healthy
+	$(DC) up -d --wait
+
+down: ## Stop the stack, the legacy ERP included
+	$(DC) --profile erp down --remove-orphans
+
+build: ## Rebuild the Docker images
+	$(DC) build --pull
+
+images: ## Build the production images (estiba-backend and estiba-frontend), as the deployment builds them
+	docker build --target frankenphp_prod --tag estiba-backend:local backend
+	docker build --target frontend_prod --tag estiba-frontend:local frontend
+
+logs: ## Follow PHP logs
+	$(DC) logs -f php
+
+sh: ## Open a shell in the PHP container
+	$(DC) exec php sh
+
+composer: ## Run Composer, e.g. make composer c="require foo/bar"
+	$(PHP) composer $(c)
+
+console: ## Run the Symfony console, e.g. make console c=about
+	$(PHP) php bin/console $(c)
+
+jwt-keys: ## Generate the JWT key pair (kept out of git). Done on first start in development.
+	$(PHP) php bin/console lexik:jwt:generate-keypair --skip-if-exists
+
+tenant: ## Create a tenant and its admin, e.g. make tenant name="Acme" email=admin@acme.test (asks for the password)
+	$(DC) exec php php bin/console app:tenant:create "$(name)" "$(email)"
+
+demo: ## Load the fashion demo (a company, a distribution centre and a collection). Asks for a password.
+	$(DC) exec php php bin/console app:demo:load
+
+stock-rebuild: ## Build the stock read model again from the ledger (ADR 0013)
+	$(PHP) php bin/console app:stock-overview:rebuild
+
+## —— Legacy ERP (ADR 0046) ————————————————————————————————————
+erp-up: ## Start the simulated legacy ERP, its SFTP server and the scheduler that imports its orders (not part of `make up`)
+	$(DC) up -d --build --wait erp erp-sftp scheduler
+
+erp-logs: ## Follow the logs of the legacy ERP
+	$(DC) logs -f erp erp-sftp scheduler
+
+erp-order: ## Make the ERP take made-up orders, e.g. make erp-order n=5
+	$(DC) exec -u www-data erp php /var/www/bin/nuevo_pedido.php $(or $(n),1)
+
+erp-check: ## Try the ERP end to end: an order, its CSV file and its SOAP confirmation
+	$(DC) exec -T -u www-data erp php /var/www/bin/comprobar.php
+
+## —— Performance (E10-06, ADR 0055) ————————————————————————
+perf-seed: ## Load volume data to measure with (20k products, 500k movements, 20k orders). Needs `make demo` first. Development only
+	$(DC) exec -T database sh -c 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"' < perf/seed.sql
+
+perf-clean: ## Remove the data of perf-seed and leave the demo data as it was
+	$(DC) exec -T database sh -c 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"' < perf/clean.sql
+
+perf-explain: ## Print the plan of the queries behind the lists, over the data of perf-seed
+	$(DC) exec -T database sh -c 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"' < perf/explain.sql
+
+perf-load: ## Load test the API with k6: make perf-load PASSWORD=... [URL=http://host.docker.internal:8082 for the production image] [VUS=20 to push it to its limit]
+	@test -n "$(PASSWORD)" || { echo "Give the demo password: make perf-load PASSWORD=..."; exit 1; }
+	docker run --rm -i -e PASSWORD="$(PASSWORD)" -e VUS="$(or $(VUS),3)" -e BASE_URL="$(or $(URL),http://host.docker.internal:8080)" grafana/k6:latest run - < perf/k6/load.js
+
+perf-prod-up: ## Build and start the production image of the API on port 8082, over the development database (see compose.perf.yaml)
+	docker compose -f compose.yaml -f compose.perf.yaml --profile perf up -d --build --wait api-prod
+
+perf-prod-down: ## Stop the production image of the API
+	docker compose -f compose.yaml -f compose.perf.yaml --profile perf rm -sf api-prod
+
+## —— Worker ————————————————————————————————————————————————
+worker-logs: ## Follow the worker that handles the asynchronous events
+	$(DC) logs -f worker
+
+worker-restart: ## Restart the worker, so it runs the code you just changed
+	$(DC) restart worker
+
+failed: ## List the events that failed every retry. Show one with: make failed id=<id>
+	$(PHP) php bin/console messenger:failed:show $(id) -vv
+
+retry-failed: ## Handle the failed events again, asking for each one
+	$(DC) exec php php bin/console messenger:failed:retry
+
+## —— Quality ————————————————————————————————————————————————
+validate: ## Validate composer.json and the lock file, and audit dependencies
+	$(PHP) composer validate --strict
+	$(PHP) composer audit
+
+test: ## Run the PHPUnit test suite
+	$(PHP) php bin/console doctrine:database:create --if-not-exists --env=test --quiet
+	$(PHP) php bin/phpunit $(c)
+
+test-unit: ## Run only the unit tests (no database, about a second)
+	$(PHP) php bin/phpunit tests/Unit
+
+stan: ## Run PHPStan static analysis
+	$(PHP) php bin/console cache:warmup --env=dev --quiet
+	$(PHP) vendor/bin/phpstan analyse --memory-limit=1G
+
+cs: ## Check code style without changing files
+	$(PHP) vendor/bin/php-cs-fixer fix --dry-run --diff
+
+rector: ## Show Rector refactorings without applying them
+	$(PHP) vendor/bin/rector process --dry-run
+
+fix: ## Apply Rector refactorings and fix code style
+	$(PHP) vendor/bin/rector process
+	$(PHP) vendor/bin/php-cs-fixer fix
+
+qa: validate cs rector stan test front-qa ## Run every check (the same ones CI runs)
+
+## —— Frontend ———————————————————————————————————————————————
+front-sh: ## Open a shell in the frontend container
+	$(DC) exec frontend sh
+
+front-npm: ## Run npm in the frontend, e.g. make front-npm c="install foo". Commit package-lock.json after.
+	$(DC) exec frontend npm $(c)
+
+front-lint: ## Lint the frontend (ESLint)
+	$(FRONT) npm run lint
+
+front-format: ## Apply Prettier to the frontend
+	$(FRONT) npm run format
+
+front-typecheck: ## Type-check the frontend (TypeScript)
+	$(FRONT) npm run typecheck
+
+front-test: ## Run the frontend tests (Vitest)
+	$(FRONT) npm run test
+
+front-build: ## Build the frontend for production
+	$(FRONT) npm run build
+
+front-api-types: ## Generate the TypeScript types of the API from its running OpenAPI document (ADR 0025). Commit src/api/schema.d.ts.
+	$(FRONT) npm run api:types
+
+front-qa: ## Run every frontend check (the ones the Frontend job of CI runs)
+	$(FRONT) npm run lint
+	$(FRONT) npm run format:check
+	$(FRONT) npm run typecheck
+	$(FRONT) npm run test
+	$(FRONT) npm run build
+	$(FRONT) npm run size
