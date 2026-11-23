@@ -1,0 +1,182 @@
+doctrine:
+    dbal:
+        url: '%env(resolve:DATABASE_URL)%'
+
+        # IMPORTANT: You MUST configure your server version,
+        # either here or in the DATABASE_URL env var (see .env file)
+        #server_version: '16'
+
+        profiling_collect_backtrace: '%kernel.debug%'
+
+        # messenger_messages is the table of the failed messages (ADR 0012). A migration makes it and
+        # Messenger owns it, so the schema tools must not try to drop it.
+        schema_filter: '~^(?!messenger_messages$)~'
+
+        # Value objects are stored through custom types, so the domain stays free of Doctrine.
+        types:
+            tenant_id: App\Shared\Infrastructure\Persistence\Doctrine\Type\TenantIdType
+            warehouse_id: App\Warehouse\Infrastructure\Persistence\Doctrine\Type\WarehouseIdType
+            zone_id: App\Warehouse\Infrastructure\Persistence\Doctrine\Type\ZoneIdType
+            location_id: App\Warehouse\Infrastructure\Persistence\Doctrine\Type\LocationIdType
+            warehouse_code: App\Warehouse\Infrastructure\Persistence\Doctrine\Type\WarehouseCodeType
+            location_code: App\Warehouse\Infrastructure\Persistence\Doctrine\Type\LocationCodeType
+            display_name: App\Warehouse\Infrastructure\Persistence\Doctrine\Type\DisplayNameType
+            block_reason: App\Warehouse\Infrastructure\Persistence\Doctrine\Type\BlockReasonType
+            pick_sequence: App\Warehouse\Infrastructure\Persistence\Doctrine\Type\PickSequenceType
+            warehouse_zones: App\Warehouse\Infrastructure\Persistence\Doctrine\Type\ZonesType
+            product_id: App\Catalog\Infrastructure\Persistence\Doctrine\Type\ProductIdType
+            sku: App\Catalog\Infrastructure\Persistence\Doctrine\Type\SkuType
+            product_name: App\Catalog\Infrastructure\Persistence\Doctrine\Type\ProductNameType
+            product_gtins: App\Catalog\Infrastructure\Persistence\Doctrine\Type\GtinsType
+            product_packaging_levels: App\Catalog\Infrastructure\Persistence\Doctrine\Type\PackagingLevelsType
+            product_family: App\Shared\Infrastructure\Persistence\Doctrine\Type\ProductFamilyType
+            user_id: App\Identity\Infrastructure\Persistence\Doctrine\Type\UserIdType
+            email: App\Identity\Infrastructure\Persistence\Doctrine\Type\EmailType
+            tenant_name: App\Identity\Infrastructure\Persistence\Doctrine\Type\TenantNameType
+            password_hash: App\Identity\Infrastructure\Persistence\Doctrine\Type\PasswordHashType
+            user_roles: App\Identity\Infrastructure\Persistence\Doctrine\Type\UserRolesType
+            stock_item_id: App\Inventory\Infrastructure\Persistence\Doctrine\Type\StockItemIdType
+            stock_movement_id: App\Inventory\Infrastructure\Persistence\Doctrine\Type\StockMovementIdType
+            stock_product_id: App\Inventory\Infrastructure\Persistence\Doctrine\Type\StockProductIdType
+            stock_location_id: App\Inventory\Infrastructure\Persistence\Doctrine\Type\StockLocationIdType
+            stock_author_id: App\Inventory\Infrastructure\Persistence\Doctrine\Type\AuthorIdType
+            stock_lot: App\Inventory\Infrastructure\Persistence\Doctrine\Type\StockLotType
+            stock_expiry_date: App\Inventory\Infrastructure\Persistence\Doctrine\Type\StockExpiryDateType
+            stock_quantity: App\Inventory\Infrastructure\Persistence\Doctrine\Type\QuantityType
+            movement_reference: App\Inventory\Infrastructure\Persistence\Doctrine\Type\MovementReferenceType
+            adjustment_reason: App\Inventory\Infrastructure\Persistence\Doctrine\Type\AdjustmentReasonType
+            reservation_id: App\Inventory\Infrastructure\Persistence\Doctrine\Type\ReservationIdType
+            reservation_reference: App\Inventory\Infrastructure\Persistence\Doctrine\Type\ReservationReferenceType
+            inventory_allocations: App\Inventory\Infrastructure\Persistence\Doctrine\Type\AllocationsType
+            asn_id: App\Inbound\Infrastructure\Persistence\Doctrine\Type\AsnIdType
+            receipt_id: App\Inbound\Infrastructure\Persistence\Doctrine\Type\ReceiptIdType
+            inbound_location_id: App\Inbound\Infrastructure\Persistence\Doctrine\Type\DockLocationIdType
+            inbound_product_id: App\Inbound\Infrastructure\Persistence\Doctrine\Type\InboundProductIdType
+            inbound_lot_number: App\Inbound\Infrastructure\Persistence\Doctrine\Type\InboundLotNumberType
+            operator_id: App\Inbound\Infrastructure\Persistence\Doctrine\Type\OperatorIdType
+            putaway_task_id: App\Inbound\Infrastructure\Persistence\Doctrine\Type\PutawayTaskIdType
+            override_reason: App\Inbound\Infrastructure\Persistence\Doctrine\Type\OverrideReasonType
+            asn_reference: App\Inbound\Infrastructure\Persistence\Doctrine\Type\AsnReferenceType
+            supplier_name: App\Inbound\Infrastructure\Persistence\Doctrine\Type\SupplierNameType
+            inbound_asn_lines: App\Inbound\Infrastructure\Persistence\Doctrine\Type\AsnLinesType
+            inbound_expected_items: App\Inbound\Infrastructure\Persistence\Doctrine\Type\ExpectedItemsType
+            inbound_received_lines: App\Inbound\Infrastructure\Persistence\Doctrine\Type\ReceivedLinesType
+            order_id: App\Outbound\Infrastructure\Persistence\Doctrine\Type\OrderIdType
+            outbound_warehouse_id: App\Outbound\Infrastructure\Persistence\Doctrine\Type\ShipFromWarehouseIdType
+            order_reference: App\Outbound\Infrastructure\Persistence\Doctrine\Type\OrderReferenceType
+            customer_name: App\Outbound\Infrastructure\Persistence\Doctrine\Type\CustomerNameType
+            outbound_order_lines: App\Outbound\Infrastructure\Persistence\Doctrine\Type\OrderLinesType
+            wave_id: App\Outbound\Infrastructure\Persistence\Doctrine\Type\WaveIdType
+            pick_list_id: App\Outbound\Infrastructure\Persistence\Doctrine\Type\PickListIdType
+            outbound_wave_orders: App\Outbound\Infrastructure\Persistence\Doctrine\Type\WaveOrdersType
+            outbound_wave_pick_lists: App\Outbound\Infrastructure\Persistence\Doctrine\Type\WavePickListsType
+            outbound_pick_lines: App\Outbound\Infrastructure\Persistence\Doctrine\Type\PickLinesType
+            outbound_operator_id: App\Outbound\Infrastructure\Persistence\Doctrine\Type\OperatorIdType
+            audit_entry_id: App\Audit\Infrastructure\Persistence\Doctrine\Type\AuditEntryIdType
+            shipment_id: App\Outbound\Infrastructure\Persistence\Doctrine\Type\ShipmentIdType
+            outbound_shipment_picked: App\Outbound\Infrastructure\Persistence\Doctrine\Type\ShipmentPickedType
+            outbound_parcels: App\Outbound\Infrastructure\Persistence\Doctrine\Type\ParcelsType
+    orm:
+        validate_xml_mapping: true
+        naming_strategy: doctrine.orm.naming_strategy.underscore
+        identity_generation_preferences:
+            Doctrine\DBAL\Platforms\PostgreSQLPlatform: identity
+        auto_mapping: true
+        # Adds the tenant to every query. It starts off and is turned on for each signed-in request.
+        filters:
+            tenant:
+                class: App\Shared\Infrastructure\Persistence\Doctrine\TenantFilter
+                enabled: false
+        # Each bounded context registers its own XML mapping here,
+        # so the domain model stays free of Doctrine attributes.
+        mappings:
+            Identity:
+                type: xml
+                is_bundle: false
+                dir: '%kernel.project_dir%/src/Identity/Infrastructure/Persistence/Doctrine'
+                prefix: 'App\Identity\Domain'
+                alias: Identity
+            Warehouse:
+                type: xml
+                is_bundle: false
+                dir: '%kernel.project_dir%/src/Warehouse/Infrastructure/Persistence/Doctrine'
+                prefix: 'App\Warehouse\Domain'
+                alias: Warehouse
+            Catalog:
+                type: xml
+                is_bundle: false
+                dir: '%kernel.project_dir%/src/Catalog/Infrastructure/Persistence/Doctrine'
+                prefix: 'App\Catalog\Domain'
+                alias: Catalog
+            Inventory:
+                type: xml
+                is_bundle: false
+                dir: '%kernel.project_dir%/src/Inventory/Infrastructure/Persistence/Doctrine'
+                prefix: 'App\Inventory\Domain'
+                alias: Inventory
+            InventoryReadModel:
+                type: xml
+                is_bundle: false
+                dir: '%kernel.project_dir%/src/Inventory/Infrastructure/Persistence/ReadModel'
+                prefix: 'App\Inventory\Infrastructure\Persistence\ReadModel'
+                alias: InventoryReadModel
+            Inbound:
+                type: xml
+                is_bundle: false
+                dir: '%kernel.project_dir%/src/Inbound/Infrastructure/Persistence/Doctrine'
+                prefix: 'App\Inbound\Domain'
+                alias: Inbound
+            Outbound:
+                type: xml
+                is_bundle: false
+                dir: '%kernel.project_dir%/src/Outbound/Infrastructure/Persistence/Doctrine'
+                prefix: 'App\Outbound\Domain'
+                alias: Outbound
+            Audit:
+                type: xml
+                is_bundle: false
+                dir: '%kernel.project_dir%/src/Audit/Infrastructure/Persistence/Doctrine'
+                prefix: 'App\Audit\Domain'
+                alias: Audit
+            OutboundSscc:
+                type: xml
+                is_bundle: false
+                dir: '%kernel.project_dir%/src/Outbound/Infrastructure/Persistence/Sscc'
+                prefix: 'App\Outbound\Infrastructure\Persistence\Sscc'
+                alias: OutboundSscc
+            ErpPersistence:
+                type: xml
+                is_bundle: false
+                dir: '%kernel.project_dir%/src/Erp/Infrastructure/Persistence'
+                prefix: 'App\Erp\Infrastructure\Persistence'
+                alias: ErpPersistence
+            CatalogGtinIndex:
+                type: xml
+                is_bundle: false
+                dir: '%kernel.project_dir%/src/Catalog/Infrastructure/Persistence/GtinIndex'
+                prefix: 'App\Catalog\Infrastructure\Persistence\GtinIndex'
+                alias: CatalogGtinIndex
+
+when@test:
+    doctrine:
+        dbal:
+            # "TEST_TOKEN" is typically set by ParaTest
+            dbname_suffix: '_test%env(default::TEST_TOKEN)%'
+
+when@prod:
+    doctrine:
+        orm:
+            query_cache_driver:
+                type: pool
+                pool: doctrine.system_cache_pool
+            result_cache_driver:
+                type: pool
+                pool: doctrine.result_cache_pool
+
+    framework:
+        cache:
+            pools:
+                doctrine.result_cache_pool:
+                    adapter: cache.app
+                doctrine.system_cache_pool:
+                    adapter: cache.system
