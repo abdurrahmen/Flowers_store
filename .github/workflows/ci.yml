@@ -1,0 +1,405 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push to the same branch cancels the run that is still in progress.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PHP_VERSION: "8.4"
+  NODE_VERSION: "24"
+  PHP_EXTENSIONS: apcu, intl, pdo_pgsql, redis, soap, zip
+
+defaults:
+  run:
+    working-directory: backend
+
+jobs:
+  composer:
+    name: Composer
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: ${{ env.PHP_EXTENSIONS }}
+          tools: composer:v2
+          coverage: none
+
+      - name: Validate composer.json and the lock file
+        run: composer validate --strict
+
+      # .env is not in the repository. Composer's scripts boot the kernel, so every job that installs
+      # dependencies needs it. The secrets are new and random on every run.
+      - name: Create the environment file
+        run: sh scripts/create-env.sh
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Audit dependencies for known vulnerabilities
+        run: composer audit
+
+  code-style:
+    name: Code style
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: ${{ env.PHP_EXTENSIONS }}
+          tools: composer:v2
+          coverage: none
+
+      - name: Get Composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: composer-${{ runner.os }}-${{ hashFiles('backend/composer.lock') }}
+          restore-keys: composer-${{ runner.os }}-
+
+      # .env is not in the repository. Composer's scripts boot the kernel, so every job that installs
+      # dependencies needs it. The secrets are new and random on every run.
+      - name: Create the environment file
+        run: sh scripts/create-env.sh
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: PHP-CS-Fixer
+        run: vendor/bin/php-cs-fixer fix --dry-run --diff
+
+      - name: Rector
+        run: vendor/bin/rector process --dry-run --no-progress-bar
+
+  static-analysis:
+    name: PHPStan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      APP_ENV: dev
+      DATABASE_URL: postgresql://estiba:estiba@127.0.0.1:5432/estiba?serverVersion=17&charset=utf8
+      REDIS_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: ${{ env.PHP_EXTENSIONS }}
+          tools: composer:v2
+          coverage: none
+
+      - name: Get Composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: composer-${{ runner.os }}-${{ hashFiles('backend/composer.lock') }}
+          restore-keys: composer-${{ runner.os }}-
+
+      # .env is not in the repository. Composer's scripts boot the kernel, so every job that installs
+      # dependencies needs it. The secrets are new and random on every run.
+      - name: Create the environment file
+        run: sh scripts/create-env.sh
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      # PHPStan's Symfony extension reads the compiled container.
+      - name: Warm up the dev container
+        run: php bin/console cache:warmup --env=dev
+
+      - name: Restore PHPStan result cache
+        uses: actions/cache@v4
+        with:
+          path: backend/var/cache/phpstan
+          key: phpstan-${{ github.sha }}
+          restore-keys: phpstan-
+
+      - name: PHPStan
+        run: vendor/bin/phpstan analyse --memory-limit=1G --no-progress
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      APP_ENV: test
+      DATABASE_URL: postgresql://estiba:estiba@127.0.0.1:5432/estiba?serverVersion=17&charset=utf8
+      REDIS_URL: redis://127.0.0.1:6379
+    services:
+      database:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: estiba
+          POSTGRES_USER: estiba
+          POSTGRES_PASSWORD: estiba
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U estiba -d estiba"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: ${{ env.PHP_EXTENSIONS }}
+          tools: composer:v2
+          coverage: none
+
+      - name: Get Composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: composer-${{ runner.os }}-${{ hashFiles('backend/composer.lock') }}
+          restore-keys: composer-${{ runner.os }}-
+
+      # .env is not in the repository. Composer's scripts boot the kernel, so every job that installs
+      # dependencies needs it. The secrets are new and random on every run.
+      - name: Create the environment file
+        run: sh scripts/create-env.sh
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Create the test database
+        run: php bin/console doctrine:database:create --if-not-exists --no-interaction
+
+      # The tests sign real tokens, so they need a key pair. Keys are never committed (ADR 0008).
+      - name: Generate the JWT key pair
+        run: php bin/console lexik:jwt:generate-keypair --skip-if-exists --no-interaction
+
+      - name: PHPUnit
+        run: php bin/phpunit
+
+  pr-title:
+    name: PR title
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      # The title becomes the squash commit message, so it follows Conventional Commits.
+      # It goes through an environment variable so it is never interpreted as shell code.
+      - name: Check Conventional Commits format
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|refactor|test|docs|build|ci|perf|style|chore)(\([a-z0-9-]+\))?!?: .{1,72}$'
+          if ! printf '%s' "$TITLE" | grep -Eq "$pattern"; then
+            echo "::error title=Invalid PR title::\"$TITLE\" does not match <type>(<scope>): <description>. See CONTRIBUTING.md."
+            exit 1
+          fi
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Audit the dependencies that ship for known vulnerabilities
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Prettier
+        run: npm run format:check
+
+      - name: TypeScript
+        run: npm run typecheck
+
+      - name: Tests
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+      - name: Size of the JavaScript against its budget
+        run: npm run size
+
+  frontend-e2e:
+    name: Frontend E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Install the browsers
+        run: npx playwright install --with-deps chromium firefox
+
+      - name: End-to-end tests
+        run: npm run test:e2e
+
+      - name: Keep the report when a test fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report
+          retention-days: 7
+
+  # The production images (ADR 0052). Built as the deployment builds them, then looked into: what a
+  # production image must not hold is as important as what it must.
+  images:
+    name: Images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the backend image
+        run: docker build --target frankenphp_prod --tag estiba-backend:ci backend
+
+      - name: The backend image holds the application and nothing of development
+        run: |
+          docker run --rm --entrypoint sh estiba-backend:ci -c '
+            set -eu
+            for extension in apcu intl "Zend OPcache" pdo_pgsql redis soap zip; do
+              php -r "exit(extension_loaded(\"$extension\") ? 0 : 1);" || { echo "missing extension: $extension"; exit 1; }
+            done
+            test ! -d tests
+            test ! -d vendor/phpunit
+            test ! -e config/jwt/private.pem
+            test ! -s .env
+            test -d var/cache/prod
+            # Not root, and unable to change its own code: it writes in var/ and nowhere else (ADR 0053).
+            test "$(id -u)" != 0
+            touch var/log/write-test && rm var/log/write-test
+            test ! -w src
+          '
+
+      # The image starts with nothing but its environment. With no database and no Redis behind it, the
+      # health check must answer 503 and say which checks failed: a 500 would mean the application did
+      # not even start. The values are for this test and are not secrets.
+      - name: The backend image starts from its environment
+        run: |
+          docker run --detach --name backend --publish 8090:8080 \
+            --env APP_SECRET=ci-only \
+            --env DATABASE_URL="postgresql://u:p@127.0.0.1:5432/d?serverVersion=17&charset=utf8" \
+            --env REDIS_URL=redis://127.0.0.1:6379 \
+            --env MESSENGER_TRANSPORT_DSN=redis://127.0.0.1:6379/messages \
+            --env MESSENGER_FAILED_TRANSPORT_DSN="doctrine://default?queue_name=failed&auto_setup=0" \
+            --env JWT_SECRET_KEY=/tmp/private.pem \
+            --env JWT_PUBLIC_KEY=/tmp/public.pem \
+            --env JWT_PASSPHRASE=ci-only \
+            --env DEFAULT_URI=http://localhost \
+            --env MERCURE_URL=http://localhost/.well-known/mercure \
+            --env MERCURE_PUBLISHER_JWT_KEY=ci-only-publisher-key-0123456789abcdef0123456789abcdef \
+            --env MERCURE_SUBSCRIBER_JWT_KEY=ci-only-subscriber-key-0123456789abcdef0123456789abcdef \
+            estiba-backend:ci
+          code=000
+          for attempt in $(seq 1 30); do
+            code=$(curl --silent --output /tmp/health.json --write-out '%{http_code}' http://127.0.0.1:8090/health || true)
+            [ "$code" != "000" ] && break
+            sleep 1
+          done
+          cat /tmp/health.json
+          test "$code" = "503"
+          grep -q '"status":"degraded"' /tmp/health.json
+          # The answer carries the security headers of ADR 0053, and the process is not root.
+          curl --silent --include http://127.0.0.1:8090/health | grep -qi '^x-content-type-options: nosniff'
+          test "$(docker exec backend id -u)" != 0
+          # Liveness does not look at the database: it answers 200 even with nothing behind the image, and every
+          # answer carries the identifier of the request (ADR 0062).
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8090/health/live)" = "200"
+          curl --silent --include http://127.0.0.1:8090/health/live | grep -qi '^x-request-id: '
+          # The check of the image answers too: Docker runs it with the same command.
+          docker exec backend php -r 'exit(@file_get_contents("http://127.0.0.1:8080/health/live") === false ? 1 : 0);'
+
+      - name: Show the logs of the backend container when it fails
+        if: failure()
+        run: docker logs backend || true
+
+      - name: Build the frontend image
+        run: docker build --target frontend_prod --tag estiba-frontend:ci frontend
+
+      - name: The frontend image serves the app
+        run: |
+          docker run --detach --name frontend --publish 8080:8080 --env API_UPSTREAM=http://127.0.0.1:9 estiba-frontend:ci
+          curl --silent --show-error --fail --retry 15 --retry-delay 1 --retry-connrefused --retry-all-errors --output /dev/null http://127.0.0.1:8080/
+          # A route of the app is the app: the browser asks for /orders on a reload.
+          curl --silent --show-error --fail http://127.0.0.1:8080/orders | grep -q 'id="root"'
+          curl --silent --head http://127.0.0.1:8080/orders | grep -qi '^cache-control: no-cache'
+          # The security headers of ADR 0053, and a content policy that lets the app load only from itself.
+          headers=$(curl --silent --head http://127.0.0.1:8080/orders)
+          printf '%s' "$headers" | grep -qi '^x-content-type-options: nosniff'
+          printf '%s' "$headers" | grep -qi '^content-security-policy:.*default-src .self.'
+          printf '%s' "$headers" | grep -qi '^content-security-policy:.*frame-ancestors .none.'
+          printf '%s' "$headers" | grep -qi '^x-frame-options: deny'
+          # Not root.
+          test "$(docker exec frontend id -u)" != 0
+          # The files of a build have a hash in their name and are kept for a year.
+          asset=$(curl --silent http://127.0.0.1:8080/ | grep -o '/assets/[^"]*\.js' | head -n 1)
+          test -n "$asset"
+          curl --silent --head "http://127.0.0.1:8080$asset" | grep -qi '^cache-control:.*immutable'
+
+      - name: Show the logs of the frontend container when it fails
+        if: failure()
+        run: docker logs frontend || true
